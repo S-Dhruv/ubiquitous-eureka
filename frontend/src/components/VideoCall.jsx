@@ -4,30 +4,33 @@ import { useParams } from "react-router-dom";
 import { io } from "socket.io-client";
 
 const socket = io("http://localhost:3001");
+
 const VideoCall = () => {
   const { roomId } = useParams();
   const localVideoRef = useRef(null);
   const [localStream, setLocalStream] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState([]);
   const peersRef = useRef({});
+  const [socketId, setSocketId] = useState("");
 
   useEffect(() => {
+    socket.on("socket-id", (id) => {
+      setSocketId(id);
+      console.log("Socket Id", id);
+    });
+
     const init = async () => {
-      // 1. Get media stream
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
-      console.log("Init", stream);
+
+      console.log("Init local stream", stream);
       setLocalStream(stream);
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
-      console.log(socket);
-      // 2. Join the room
-      socket.emit("join-room", roomId, socket.id);
-      console.log("RoomId", roomId, socket.id);
-      // 3. Handle existing users
+
       socket.on("all-users", async (users) => {
         users.forEach(async (userId) => {
           const pc = createPeerConnection(userId, stream);
@@ -44,13 +47,11 @@ const VideoCall = () => {
         });
       });
 
-      // 4. Handle new user joining
       socket.on("user-connected", async (userId) => {
         const pc = createPeerConnection(userId, stream);
         peersRef.current[userId] = pc;
       });
 
-      // 5. Handle signal (offer/answer)
       socket.on("signal", async ({ from, signal }) => {
         let pc = peersRef.current[from];
 
@@ -60,7 +61,10 @@ const VideoCall = () => {
         }
 
         if (signal.type === "offer") {
-          console.log(`Creating answer for user ${from}`);
+          if (pc.signalingState !== "stable") {
+            console.warn("Skipping duplicate offer, already in stable state");
+            return;
+          }
 
           await pc.setRemoteDescription(new RTCSessionDescription(signal));
           const answer = await pc.createAnswer();
@@ -71,26 +75,53 @@ const VideoCall = () => {
             from: socket.id,
             signal: pc.localDescription,
           });
+
+          // Drain queued ICE candidates
+          if (pc._queuedCandidates?.length) {
+            for (const candidate of pc._queuedCandidates) {
+              await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            }
+            pc._queuedCandidates = [];
+          }
         } else if (signal.type === "answer") {
           await pc.setRemoteDescription(new RTCSessionDescription(signal));
+
+          // Drain queued ICE candidates
+          if (pc._queuedCandidates?.length) {
+            for (const candidate of pc._queuedCandidates) {
+              await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            }
+            pc._queuedCandidates = [];
+          }
         }
       });
 
-      // 6. Handle ICE candidates
-      socket.on("ice-candidate", ({ from, candidate }) => {
+      socket.on("ice-candidate", async ({ from, candidate }) => {
         const pc = peersRef.current[from];
         if (pc && candidate) {
-          pc.addIceCandidate(new RTCIceCandidate(candidate));
+          if (pc.remoteDescription && pc.remoteDescription.type) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              console.log("ICE candidate added");
+            } catch (err) {
+              console.error("Failed to add ICE candidate", err);
+            }
+          } else {
+            console.warn(
+              "Remote description not ready. Queuing ICE candidate."
+            );
+            if (!pc._queuedCandidates) pc._queuedCandidates = [];
+            pc._queuedCandidates.push(candidate);
+          }
         }
       });
 
-      // 7. Handle user disconnect
       socket.on("user-disconnected", (userId) => {
         if (peersRef.current[userId]) {
           peersRef.current[userId].close();
           delete peersRef.current[userId];
           setRemoteStreams((prev) =>
-            prev.filter((stream) => stream.id !== userId)
+            prev.filter((streamObj) => streamObj.id !== userId)
           );
         }
       });
@@ -103,11 +134,24 @@ const VideoCall = () => {
     };
   }, [roomId]);
 
+  useEffect(() => {
+    if (socketId && roomId) {
+      socket.emit("join-room", roomId, socketId);
+      console.log("Joining room:", roomId, "as", socketId);
+    }
+  }, [socketId, roomId]);
+
   const createPeerConnection = (userId, stream) => {
     const pc = new RTCPeerConnection();
+
     console.log(`Creating PeerConnection for user ${userId}`);
+
+    pc.onsignalingstatechange = () => {
+      console.log("Signaling state:", pc.signalingState);
+    };
+
     pc.oniceconnectionstatechange = () => {
-      console.log("ICE state:", pc.iceConnectionState);
+      console.log("ICE connection state:", pc.iceConnectionState);
     };
 
     pc.onconnectionstatechange = () => {
@@ -130,11 +174,12 @@ const VideoCall = () => {
 
     pc.ontrack = (event) => {
       const remoteStream = event.streams[0];
-      console.log("Received remote stream from user:", userId); // ✅ Debug log
+      console.log("Received remote stream from user:", userId);
+
       setRemoteStreams((prev) => {
         const exists = prev.some((s) => s.id === userId);
         if (!exists) {
-          console.log("Adding remote stream", remoteStream); // ✅ Debug log
+          console.log("Adding remote stream", remoteStream);
           return [...prev, { id: userId, stream: remoteStream }];
         }
         return prev;
@@ -156,7 +201,7 @@ const VideoCall = () => {
           ref={(video) => {
             if (video && stream) {
               video.srcObject = stream;
-              console.log(`Video stream for user ${id} added`); // ✅ Debug log
+              console.log(`Video stream for user ${id} added`);
             }
           }}
         />
