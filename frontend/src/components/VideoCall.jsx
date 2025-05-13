@@ -4,21 +4,16 @@ import { useParams } from "react-router-dom";
 import { io } from "socket.io-client";
 
 const socket = io("http://localhost:3001");
-
+console.log('clg:', socket);
 const VideoCall = () => {
   const { roomId } = useParams();
   const localVideoRef = useRef(null);
   const [localStream, setLocalStream] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState([]);
   const peersRef = useRef({});
-  const [socketId, setSocketId] = useState("");
-
+  
   useEffect(() => {
-    socket.on("socket-id", (id) => {
-      setSocketId(id);
-      console.log("Socket Id", id);
-    });
-
+    socket.connect()
     const init = async () => {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
