@@ -19,7 +19,7 @@ io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
   // Join room event
-  let sock = socket.id
+  let sock = socket.id;
   socket.emit("socket-id", sock);
   console.log(sock);
   socket.on("join-room", (roomId, userId) => {
